@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -301,6 +302,77 @@ def main():
                   "缺少 DeepSeek API Key" in blob, blob[-200:])
         finally:
             shutil.rmtree(probe, ignore_errors=True)
+
+        print("\n[13] 登录等待逻辑（原实现会静默空转到超时）")
+
+        class _Loc:
+            def __init__(self, n):
+                self._n = n
+
+            def count(self):
+                return self._n
+
+        class _Page:
+            def __init__(self, present, url="https://creator.xiaohongshu.com/publish/publish?target=image"):
+                self.present = set(present)
+                self.url = url
+                self.shots = []
+
+            def locator(self, sel):
+                return _Loc(1 if sel in self.present else 0)
+
+            def title(self):
+                return "小红书创作服务平台"
+
+            def screenshot(self, path=None):
+                self.shots.append(path)
+                open(path, "w").write("x")
+
+        import contextlib
+        import io
+
+        scratch = tempfile.mkdtemp(prefix="xhs_login_")
+        try:
+            # 场景 A：已登录（页面直接是发布表单，没有"上传图文"标签）
+            p = _Page({'input[type="file"]'})
+            buf = io.StringIO()
+            t0 = time.time()
+            with contextlib.redirect_stdout(buf):
+                got = xhs_auto._wait_for_login(p, scratch, timeout=20)
+            dt = time.time() - t0
+            check("已登录时立刻返回，不再空转", got is False and dt < 3,
+                  f"返回 {got}, 耗时 {dt:.1f}s")
+            check("已登录时不误报需要扫码", "需要登录" not in buf.getvalue())
+
+            # 场景 B：未登录（只有二维码，URL 里没有 login，文案也不叫"扫码登录"）
+            # —— 这正是老代码检测不到、既不提示也不报错的场景
+            p = _Page({'img[src*="qrcode"]'})
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    xhs_auto._wait_for_login(p, scratch, timeout=3)
+                check("未登录应该超时报错", False, "居然没报错")
+            except RuntimeError as e:
+                check("未登录时给出了扫码提示", "需要登录" in buf.getvalue(),
+                      buf.getvalue()[-150:])
+                check("超时错误里带排查指引", "等待登录超时" in str(e)
+                      and "Chrome for Testing" in str(e))
+            check("等待过程中有状态输出（不再静默）", "等待中" in buf.getvalue(),
+                  buf.getvalue()[-150:])
+            check("超时时留下了截图", len(p.shots) == 1 and os.path.isfile(p.shots[0] or ""),
+                  str(p.shots))
+
+            # 场景 C：URL 直接跳 login 页
+            p = _Page(set(), url="https://creator.xiaohongshu.com/login")
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    xhs_auto._wait_for_login(p, scratch, timeout=3)
+            except RuntimeError:
+                pass
+            check("URL 含 login 时也提示扫码", "需要登录" in buf.getvalue())
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
     finally:
         server.shutdown()
         keep = os.path.join(tempfile.gettempdir(), "xhs_selftest_last")

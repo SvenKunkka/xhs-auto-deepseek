@@ -97,7 +97,7 @@ IMG_W, IMG_H  = 1242, 1656          # 3:4 竖图
 TITLE_MAX     = 20                  # 小红书标题上限 20 字
 
 SEARCH_TIMEOUT  = 12
-LOGIN_TIMEOUT_S = 300               # 等扫码登录最多 5 分钟
+LOGIN_TIMEOUT_S = int(_env("XHS_LOGIN_TIMEOUT", default="300"))   # 等扫码登录最多 5 分钟
 
 # 配色主题：bg / 卡片 / 主色 / 强调 / 正文色
 THEMES = {
@@ -608,6 +608,81 @@ def _launch_browser(p):
         f"浏览器启动失败（先关掉残留的自动化浏览器窗口再试；"
         f"如提示缺浏览器，运行: playwright install chromium）：{last_err}")
 
+def _page_has(page, selectors):
+    """页面上是否出现了任一选择器匹配的元素。异常一律当作"没有"。"""
+    for sel in selectors:
+        try:
+            if page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+# 判定"已进入发布表单"的元素 —— 命中任一个就说明登录好了，可以往下走
+FORM_SELECTORS = ('input[placeholder*="标题"]', 'div.ql-editor',
+                  'div[contenteditable="true"]', 'input[type="file"]')
+# 判定"需要登录"的线索 —— 比原来只看"扫码登录"四个字宽得多
+LOGIN_SELECTORS = ('text=扫码登录', 'text=扫码', 'text=登录',
+                   'img[src*="qrcode"]', '[class*="qrcode"]', '[class*="login"]')
+
+
+def _wait_for_login(page, out_dir, timeout=None):
+    """等到页面进入发布表单为止；需要登录就提示扫码。
+
+    返回 True 表示等到了登录（曾提示过扫码），False 表示本来就已登录。
+
+    原实现只检查 URL 里有没有 "login" 和页面上有没有"扫码登录"四个字，
+    而发布页 URL 带 ?target=image 时小红书直接进图片上传视图，页面上根本没有
+    "上传图文"标签，于是既检测不到、也不报错，一直空转到超时 —— 用户看到的就是
+    "卡住了"且毫无输出。这里改为正向判断发布表单元素，并定期打印状态。
+    """
+    timeout = LOGIN_TIMEOUT_S if timeout is None else timeout
+    deadline = time.time() + timeout
+    warned = False
+    last_note = 0.0
+    started = time.time()
+    while time.time() < deadline:
+        if _page_has(page, FORM_SELECTORS):
+            return warned
+
+        need_login = "login" in getattr(page, "url", "")
+        if not need_login:
+            need_login = _page_has(page, LOGIN_SELECTORS)
+        if need_login and not warned:
+            log(">>> 需要登录：请在弹出的浏览器窗口里用小红书 App 扫码"
+                "（只需一次，之后会记住登录态）")
+            warned = True
+
+        now = time.time()
+        if now - last_note >= 15:          # 定期报状态，避免看着像卡死
+            last_note = now
+            try:
+                title = (page.title() or "")[:30]
+            except Exception:
+                title = ""
+            log(f"    等待中… 已等 {int(now - started)}s / {timeout}s"
+                f"｜页面：{title or str(getattr(page, 'url', ''))[:40]}"
+                f"{'（疑似需要扫码）' if need_login else ''}")
+        time.sleep(2)
+
+    shot = os.path.join(out_dir, "等待登录超时.png")
+    try:
+        page.screenshot(path=shot)
+    except Exception:
+        pass
+    try:
+        title = page.title()
+    except Exception:
+        title = "?"
+    raise RuntimeError(
+        f"等待登录超时（{timeout}s）。当前页面：{title} / {getattr(page, 'url', '?')}\n"
+        f"    1) 确认浏览器窗口是不是被别的窗口挡住了"
+        f"（自动化用的是独立的 Google Chrome for Testing，不是日常那个 Chrome）\n"
+        f"    2) 没登录就用小红书 App 扫码；已登录仍卡住说明页面又改版了，截图见 {shot}\n"
+        f"    3) 扫码来不及可加大超时：export XHS_LOGIN_TIMEOUT=600 再跑")
+
+
 def publish_to_xhs(data, image_paths, out_dir, auto_yes=False):
     """打开创作者中心，上传图片并自动填入标题/正文/话题。"""
     from playwright.sync_api import sync_playwright
@@ -618,22 +693,8 @@ def publish_to_xhs(data, image_paths, out_dir, auto_yes=False):
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(XHS_PUBLISH_URL, wait_until="domcontentloaded")
 
-        # ---- 等登录：未登录会跳到 login 页 ----
-        deadline = time.time() + LOGIN_TIMEOUT_S
-        warned = False
-        while time.time() < deadline:
-            if "login" in page.url or page.locator("text=扫码登录").count() > 0:
-                if not warned:
-                    log(">>> 请在弹出的浏览器里用小红书 App 扫码登录（只需一次，之后会记住）")
-                    warned = True
-                time.sleep(2)
-                continue
-            tab = _first_visible(page, ['div:has-text("上传图文")', 'span:has-text("上传图文")'], 4000)
-            if tab:
-                break
-            time.sleep(2)
-        else:
-            raise RuntimeError("等待登录超时")
+        # ---- 等登录 ----
+        warned = _wait_for_login(page, out_dir)
         if warned:
             log("登录成功，登录态已保存")
             page.goto(XHS_PUBLISH_URL, wait_until="domcontentloaded")
@@ -775,7 +836,15 @@ def run(topic, pages=4, theme=None, research=True, publish=True, auto_yes=False)
     stamp = datetime.datetime.now().strftime("%m%d_%H%M")
     safe_topic = re.sub(r'[\\/:*?"<>|\s]+', "_", topic)[:20]
     out_dir = os.path.join(OUT_ROOT, f"{stamp}_{safe_topic}")
-    os.makedirs(out_dir, exist_ok=True)
+    # 同一分钟内跑两次同一话题会撞目录，旧实现用 exist_ok=True 直接复用，
+    # 结果两次的图片和文案互相覆盖。这里撞了就加序号另开一个。
+    if os.path.exists(out_dir):
+        for i in range(2, 100):
+            alt = f"{out_dir}-{i}"
+            if not os.path.exists(alt):
+                out_dir = alt
+                break
+    os.makedirs(out_dir, exist_ok=False)
     log(f"输出目录：{out_dir}")
 
     reference = search_reference(topic) if research else ""
