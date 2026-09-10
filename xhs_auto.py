@@ -745,14 +745,18 @@ def _has_login_cookie(page):
 
 
 def _wait_for_login(page, out_dir, timeout=None):
-    """等到页面进入发布表单为止；需要登录就提示扫码。
+    """等到真正登录成功为止；需要登录就提示扫码。
 
     返回 True 表示等到了登录（曾提示过扫码），False 表示本来就已登录。
 
-    原实现只检查 URL 里有没有 "login" 和页面上有没有"扫码登录"四个字，
-    而发布页 URL 带 ?target=image 时小红书直接进图片上传视图，页面上根本没有
-    "上传图文"标签，于是既检测不到、也不报错，一直空转到超时 —— 用户看到的就是
-    "卡住了"且毫无输出。这里改为正向判断发布表单元素，并定期打印状态。
+    判定优先级（踩过两次坑，别再调换）：
+      1. web_session cookie 才是权威依据。有就是登录了，没有就是没登录。
+      2. 「页面上有表单元素」只能作为读不到 cookie 时的退路 ——
+         发布页在**未登录**时也会渲染出上传控件（盖着登录浮层），
+         拿它当登录依据会误判成功，然后在后续上传步骤莫名其妙失败。
+    历史上这里还犯过另一个错：只认 URL 里的 "login" 和页面上的「扫码登录」
+    四个字，而发布页 URL 带 ?target=image 时两者都不成立，于是既不提示也
+    不报错，一直空转到超时 —— 用户看到的就是「卡住了」且毫无输出。
     """
     timeout = LOGIN_TIMEOUT_S if timeout is None else timeout
     deadline = time.time() + timeout
@@ -760,13 +764,19 @@ def _wait_for_login(page, out_dir, timeout=None):
     last_note = 0.0
     started = time.time()
     while time.time() < deadline:
-        if _page_has(page, FORM_SELECTORS):
+        ck = _has_login_cookie(page)
+        if ck is True:
+            return warned
+        # 只有拿不到 cookie 信息（None）时才退回用表单元素判断；
+        # ck is False 表示明确没登录，此时表单元素一律不算数
+        if ck is None and _page_has(page, FORM_SELECTORS):
+            log("    （读不到 cookie，暂按页面表单判断为已登录，若后续失败请重跑）")
             return warned
 
         need_login = "login" in getattr(page, "url", "")
         if not need_login:
             need_login = _page_has(page, LOGIN_SELECTORS)
-        if not need_login and _has_login_cookie(page) is False:
+        if not need_login and ck is False:
             need_login = True      # 连 web_session 都没有，那肯定没登录
         if need_login and not warned:
             log(">>> 需要登录：请在弹出的浏览器窗口里用小红书 App 扫码"
@@ -827,6 +837,9 @@ def check_login(timeout=None):
                 return False
             ck = _has_login_cookie(page)
             log(f"web_session：{'有 ✅' if ck else '没有 ❌' if ck is False else '读不到（不下结论）'}")
+            if ck is False:
+                log("❌ 页面看起来像发布表单，但没有 web_session，判定为未登录。")
+                return False
             try:
                 log(f"当前页面：{page.title()}")
             except Exception:

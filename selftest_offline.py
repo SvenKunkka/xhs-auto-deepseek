@@ -404,6 +404,29 @@ def main():
             p2 = _Page(set())          # 没有 context 属性 -> 拿不到信息，不下结论
             check("拿不到 cookie 信息时返回 None（不误判）",
                   xhs_auto._has_login_cookie(p2) is None)
+
+            # 场景 E：最关键的一条 —— 页面上有表单控件，但没有 web_session。
+            # 发布页在未登录时也会渲染上传控件（盖着登录浮层），
+            # 曾因此误判成"登录成功"，然后在后续步骤莫名失败。
+            p = _Page({'input[type="file"]'})
+            p.context = _Ctx([{"name": "galaxy_creator_session_id", "value": "guest"}])
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    xhs_auto._wait_for_login(p, scratch, timeout=3)
+                check("有表单控件但无 web_session 时必须判为未登录", False,
+                      "居然判成已登录了")
+            except RuntimeError:
+                check("有表单控件但无 web_session 时判为未登录（不误判）", True)
+            check("该场景下仍持续提示需要扫码", "需要登录" in buf.getvalue())
+
+            # 场景 F：有 web_session 就该立刻通过，不受表单判断影响
+            p = _Page(set())
+            p.context = _Ctx([{"name": "web_session", "value": "real"}])
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                got = xhs_auto._wait_for_login(p, scratch, timeout=3)
+            check("有 web_session 时直接通过", got is False)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
