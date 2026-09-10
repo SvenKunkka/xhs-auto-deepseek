@@ -103,17 +103,36 @@ def _system_chrome_profile():
     return p if p and os.path.isdir(p) else None
 
 
-# 登录态放哪：默认直接复用你日常那个 Chrome 的 profile。
-# 原实现用工具自带的 Google Chrome for Testing + 一套独立 profile，和你平时
-# 登录着小红书的浏览器 cookie 完全不共享，于是每次都要重新扫码。共用同一个
-# profile 就没这个问题了（代价是运行时要先完全退出 Chrome）。
-SYSTEM_CHROME_PROFILE = _system_chrome_profile()
+# 登录态放哪。
+#
+# 曾尝试默认复用「你日常那个 Chrome 的 profile」，避免反复扫码，但在
+# Chrome 153 + Playwright 1.62 上实测走不通，两条路都堵死：
+#   1) launch_persistent_context 指向现有大 profile：Chrome 主进程起来了，
+#      但 50 秒都不创建窗口，Playwright 握手超时（全新 profile 0.9 秒就成功，
+#      所以不是 channel 的问题，是这个 profile 无法被自动化启动）。
+#   2) 连正在运行的 Chrome（connect_over_cdp）：Chrome 136+ 直接拒绝
+#      "DevTools remote debugging requires a non-default data directory"。
+# 所以默认回到独立 profile：扫码一次，登录态就存在这里，之后不用再扫。
+#
+# 想要共用系统 Chrome（比如你的环境能跑通）：
+#   export XHS_USE_SYSTEM_CHROME=1
+# 或者直接指定任意目录：
+#   export XHS_PROFILE_DIR=/path/to/profile
 _OWN_PROFILE = os.path.join(OUT_ROOT, "browser_profile")
-PROFILE_DIR = os.path.expanduser(_env("XHS_PROFILE_DIR")) if _env("XHS_PROFILE_DIR") else (
-    SYSTEM_CHROME_PROFILE or _OWN_PROFILE)
-USING_SYSTEM_PROFILE = PROFILE_DIR == SYSTEM_CHROME_PROFILE and SYSTEM_CHROME_PROFILE is not None
-# 用系统 Chrome 的 profile 就必须用系统 Chrome 本体打开（内置 Chromium 版本较旧，
-# 打开新版 Chrome 的 profile 会报 profile 版本不兼容）
+SYSTEM_CHROME_PROFILE = _system_chrome_profile()
+_WANT_SYSTEM = _env("XHS_USE_SYSTEM_CHROME", default="0").lower() in ("1", "true", "yes", "on")
+
+if _env("XHS_PROFILE_DIR"):
+    PROFILE_DIR = os.path.expanduser(_env("XHS_PROFILE_DIR"))
+elif _WANT_SYSTEM and SYSTEM_CHROME_PROFILE:
+    PROFILE_DIR = SYSTEM_CHROME_PROFILE
+else:
+    PROFILE_DIR = _OWN_PROFILE
+
+USING_SYSTEM_PROFILE = (SYSTEM_CHROME_PROFILE is not None
+                        and PROFILE_DIR == SYSTEM_CHROME_PROFILE)
+# 用系统 Chrome 的 profile 就得用系统 Chrome 本体打开
+# （内置 Chromium 较旧，打不开新版 Chrome 的 profile）
 USE_CHROME_CHANNEL = USING_SYSTEM_PROFILE
 
 XHS_PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish?source=official&target=image"
