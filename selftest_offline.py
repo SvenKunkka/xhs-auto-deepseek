@@ -283,6 +283,24 @@ def main():
                   out.stdout or out.stderr[-300:])
         finally:
             shutil.rmtree(probe, ignore_errors=True)
+
+        print("\n[12] 命令行：不加引号的多词话题")
+        probe = tempfile.mkdtemp(prefix="xhs_cli_")
+        try:
+            shutil.copy(os.path.join(here, "xhs_auto.py"), probe)
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("DEEPSEEK_", "XHS_AI_"))}
+            # 故意不给 Key：解析通过的话报"缺少 Key"，解析失败会报 unrecognized arguments
+            out = subprocess.run(
+                [sys.executable, "xhs_auto.py", "deepseek", "4.1", "--no-publish"],
+                cwd=probe, capture_output=True, text=True, env=env, timeout=60)
+            blob = (out.stdout or "") + (out.stderr or "")
+            check("`xhs deepseek 4.1` 不再报 unrecognized arguments",
+                  "unrecognized arguments" not in blob, blob[-200:])
+            check("多词话题被接受（走到缺 Key 那步）",
+                  "缺少 DeepSeek API Key" in blob, blob[-200:])
+        finally:
+            shutil.rmtree(probe, ignore_errors=True)
     finally:
         server.shutdown()
         keep = os.path.join(tempfile.gettempdir(), "xhs_selftest_last")

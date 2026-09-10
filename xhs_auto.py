@@ -796,7 +796,10 @@ def run(topic, pages=4, theme=None, research=True, publish=True, auto_yes=False)
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="小红书图文笔记自动生成+发布（DeepSeek 文案）")
-    ap.add_argument("topic", nargs="?", help="话题，如：秋冬护肤思路（不传则交互式询问）")
+    # nargs="*" 而不是 "?"：不加引号时 shell 会把「deepseek 4.1」拆成两个参数，
+    # 用 "?" 会直接报 unrecognized arguments，对用户很不友好。这里自动拼回去。
+    ap.add_argument("topic", nargs="*",
+                    help="话题，如：秋冬护肤思路（含空格时可不加引号；不传则交互式询问）")
     ap.add_argument("--pages", type=int, default=4, help="图片张数（含封面），默认 4")
     ap.add_argument("--theme", choices=list(THEMES.keys()), help="配色主题，默认随机")
     ap.add_argument("--no-research", action="store_true", help="跳过联网搜参考")
@@ -830,10 +833,11 @@ if __name__ == "__main__":
     if a.repost:
         run_repost(a.repost, auto_yes=a.yes)
         sys.exit(0)
-    while not a.topic or not a.topic.strip():
+    topic = " ".join(a.topic).strip()      # 未加引号的多词话题在这里拼回来
+    while not topic:
         try:
-            a.topic = input("请输入话题（如：秋冬护肤思路）：").strip()
+            topic = input("请输入话题（如：秋冬护肤思路）：").strip()
         except (EOFError, KeyboardInterrupt):
             sys.exit("未输入话题，退出。")
-    run(a.topic, pages=max(2, min(a.pages, 9)), theme=a.theme,
+    run(topic, pages=max(2, min(a.pages, 9)), theme=a.theme,
         research=not a.no_research, publish=not a.no_publish, auto_yes=a.yes)
