@@ -89,7 +89,32 @@ if AI_THINKING:
     AI_TEMPERATURE = None
 
 OUT_ROOT      = os.path.expanduser("~/Downloads/xhs_auto")
-PROFILE_DIR   = os.path.join(OUT_ROOT, "browser_profile")   # 登录态保存在这里
+def _system_chrome_profile():
+    """系统安装的 Google Chrome 的默认 profile 路径；找不到返回 None。"""
+    override = _env("XHS_CHROME_PROFILE")
+    if override:
+        return os.path.expanduser(override)
+    if sys.platform == "darwin":
+        p = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    elif sys.platform.startswith("win"):
+        p = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")
+    else:
+        p = os.path.expanduser("~/.config/google-chrome")
+    return p if p and os.path.isdir(p) else None
+
+
+# 登录态放哪：默认直接复用你日常那个 Chrome 的 profile。
+# 原实现用工具自带的 Google Chrome for Testing + 一套独立 profile，和你平时
+# 登录着小红书的浏览器 cookie 完全不共享，于是每次都要重新扫码。共用同一个
+# profile 就没这个问题了（代价是运行时要先完全退出 Chrome）。
+SYSTEM_CHROME_PROFILE = _system_chrome_profile()
+_OWN_PROFILE = os.path.join(OUT_ROOT, "browser_profile")
+PROFILE_DIR = os.path.expanduser(_env("XHS_PROFILE_DIR")) if _env("XHS_PROFILE_DIR") else (
+    SYSTEM_CHROME_PROFILE or _OWN_PROFILE)
+USING_SYSTEM_PROFILE = PROFILE_DIR == SYSTEM_CHROME_PROFILE and SYSTEM_CHROME_PROFILE is not None
+# 用系统 Chrome 的 profile 就必须用系统 Chrome 本体打开（内置 Chromium 版本较旧，
+# 打开新版 Chrome 的 profile 会报 profile 版本不兼容）
+USE_CHROME_CHANNEL = USING_SYSTEM_PROFILE
 
 XHS_PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish?source=official&target=image"
 
@@ -605,7 +630,10 @@ def _first_visible(page, selectors, timeout_each=3000):
     return None
 
 def _clean_profile_locks():
-    """清掉上次浏览器异常退出残留的单实例锁文件，否则 Chrome 拒绝启动。"""
+    """清掉上次浏览器异常退出残留的单实例锁文件，否则 Chrome 拒绝启动。
+    只对自己那套独立 profile 用；系统 Chrome 的 profile 绝不擅自删锁。"""
+    if USING_SYSTEM_PROFILE:
+        return
     for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
         path = os.path.join(PROFILE_DIR, name)
         try:
@@ -614,21 +642,54 @@ def _clean_profile_locks():
         except OSError:
             pass
 
+def _app_running(name):
+    """某个 App 是否在运行（用 pgrep，避免依赖 psutil）。"""
+    import subprocess
+    try:
+        return subprocess.run(["pgrep", "-x", name],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return False
+
 def _launch_browser(p):
-    """启动 Playwright 自带 Chromium（固定版本，避免和系统 Chrome 混用同一配置目录）。"""
+    """启动浏览器。
+
+    默认复用系统 Chrome + 你日常的 profile，这样小红书等站点都保持登录，
+    不用反复扫码。代价是运行前必须先完全退出 Chrome（profile 被占用会启动失败）。
+    想用完全隔离的 profile（不打扰日常浏览器）就设 XHS_PROFILE_DIR。
+    """
+    if USING_SYSTEM_PROFILE and _app_running("Google Chrome"):
+        raise RuntimeError(
+            "检测到你的 Google Chrome 正在运行，它占着 profile，自动化起不来。\n"
+            "    → 请先完全退出 Chrome（⌘Q，不是只关窗口），再重跑本命令。\n"
+            "    → 如果希望用一套独立 profile、完全不打扰日常浏览器：\n"
+            "       export XHS_PROFILE_DIR=~/Downloads/xhs_auto/browser_profile")
+
     kwargs = dict(headless=False, viewport={"width": 1440, "height": 900},
                   args=["--disable-blink-features=AutomationControlled"])
+    if USE_CHROME_CHANNEL:
+        kwargs["channel"] = "chrome"        # 用系统装的 Google Chrome 本体
+
     last_err = None
-    for _ in range(2):
+    for attempt in range(2):
         _clean_profile_locks()
         try:
             return p.chromium.launch_persistent_context(PROFILE_DIR, **kwargs)
         except Exception as e:
             last_err = e
+            msg = str(e)
+            if USE_CHROME_CHANNEL and ("channel" in msg or "chrome" in msg.lower()):
+                # 系统 Chrome 不可用时退回内置 Chromium
+                kwargs.pop("channel", None)
+                continue
+            if USING_SYSTEM_PROFILE:
+                break                        # 系统 profile 不要再盲目重试
             time.sleep(2)
     raise RuntimeError(
-        f"浏览器启动失败（先关掉残留的自动化浏览器窗口再试；"
-        f"如提示缺浏览器，运行: playwright install chromium）：{last_err}")
+        f"浏览器启动失败（{last_err}）\n"
+        f"    当前 profile：{PROFILE_DIR}\n"
+        f"    · 用系统 Chrome 时请先 ⌘Q 完全退出 Chrome\n"
+        f"    · 用内置 Chromium 时如提示缺浏览器，运行: playwright install chromium")
 
 def _page_has(page, selectors):
     """页面上是否出现了任一选择器匹配的元素。异常一律当作"没有"。"""
@@ -720,6 +781,44 @@ def _wait_for_login(page, out_dir, timeout=None):
         f"（自动化用的是独立的 Google Chrome for Testing，不是日常那个 Chrome）\n"
         f"    2) 没登录就用小红书 App 扫码；已登录仍卡住说明页面又改版了，截图见 {shot}\n"
         f"    3) 扫码来不及可加大超时：export XHS_LOGIN_TIMEOUT=600 再跑")
+
+
+def check_login(timeout=None):
+    """只验证小红书登录态：打开浏览器 → 等进入发布表单 → 报告结果。
+
+    不生成文案、不发布任何内容。用来把"到底登录没有"这件事一次性问清楚，
+    省得靠猜——磁盘上的 Cookies 数据库在浏览器未关闭时可能不含会话 cookie，
+    这里读的是 Playwright 眼里的实时 cookie（含内存中的）。
+    """
+    from playwright.sync_api import sync_playwright
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    which = ("系统 Chrome + 你的日常 profile" if USING_SYSTEM_PROFILE
+             else "内置 Chromium + 独立 profile")
+    log(f"打开浏览器检查登录态（{which}，不会发布任何内容）…")
+    log(f"    profile：{PROFILE_DIR}")
+    with sync_playwright() as p:
+        ctx = _launch_browser(p)
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto(XHS_PUBLISH_URL, wait_until="domcontentloaded")
+            try:
+                warned = _wait_for_login(page, OUT_ROOT, timeout=timeout)
+            except RuntimeError as e:
+                log(f"❌ 没等到登录：{e}")
+                return False
+            ck = _has_login_cookie(page)
+            log(f"web_session：{'有 ✅' if ck else '没有 ❌' if ck is False else '读不到（不下结论）'}")
+            try:
+                log(f"当前页面：{page.title()}")
+            except Exception:
+                pass
+            log("✅ 已登录，可以发笔记了" + ("（本次刚扫码）" if warned else "（用的是已保存的登录态）"))
+            return True
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
 
 
 def publish_to_xhs(data, image_paths, out_dir, auto_yes=False):
@@ -931,6 +1030,8 @@ if __name__ == "__main__":
                     help=f"文案发散度 0~2，越高越活，默认 {AI_TEMPERATURE_DEFAULT}")
     ap.add_argument("--check-api", action="store_true",
                     help="只自检 DeepSeek Key / 连通性 / json 输出，不生成也不发布")
+    ap.add_argument("--check-login", action="store_true",
+                    help="只自检小红书登录态（会打开浏览器，不生成也不发布）")
     a = ap.parse_args()
 
     # 命令行覆盖配置
@@ -948,6 +1049,8 @@ if __name__ == "__main__":
     if a.check_api:
         check_api()
         sys.exit(0)
+    if a.check_login:
+        sys.exit(0 if check_login() else 1)
     if a.repost:
         run_repost(a.repost, auto_yes=a.yes)
         sys.exit(0)
