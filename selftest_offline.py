@@ -306,11 +306,19 @@ def main():
         print("\n[13] 登录等待逻辑（原实现会静默空转到超时）")
 
         class _Loc:
-            def __init__(self, n):
+            def __init__(self, n, visible=True):
                 self._n = n
+                self._visible = visible
+
+            @property
+            def first(self):
+                return self
 
             def count(self):
                 return self._n
+
+            def is_visible(self):
+                return self._n > 0 and self._visible
 
         class _Page:
             def __init__(self, present, url="https://creator.xiaohongshu.com/publish/publish?target=image"):
@@ -331,10 +339,19 @@ def main():
         import contextlib
         import io
 
+        class _Ctx:
+            def __init__(self, cookies):
+                self._c = cookies
+
+            def cookies(self, url=None):
+                return self._c
+
         scratch = tempfile.mkdtemp(prefix="xhs_login_")
         try:
-            # 场景 A：已登录（页面直接是发布表单，没有"上传图文"标签）
-            p = _Page({'input[type="file"]'})
+            # 场景 A：当前真实复现 —— 右上角已有账号，发布页显示“上传图片”，
+            # 但新版页面没有旧的 web_session。必须直接继续，不能等 300 秒。
+            p = _Page({'text=上传图片'})
+            p.context = _Ctx([{"name": "galaxy_creator_session_id", "value": "creator"}])
             buf = io.StringIO()
             t0 = time.time()
             with contextlib.redirect_stdout(buf):
@@ -372,28 +389,23 @@ def main():
                 pass
             check("URL 含 login 时也提示扫码", "需要登录" in buf.getvalue())
 
-            # 场景 D：页面无 login 字样、无二维码图，但 cookie 里没有 web_session
-            # —— 只有这种 cookie 级判据才能识破"假登录态"
-            class _Ctx:
-                def __init__(self, cookies):
-                    self._c = cookies
-
-                def cookies(self, url=None):
-                    return self._c
-
+            # 场景 D：页面无发布入口、无二维码，但 cookie 里没有 web_session。
+            # 页面状态不明确时仍应等待，且首屏宽限期内不能误报扫码。
             p = _Page(set())
             p.context = _Ctx([{"name": "access-token-creator.xiaohongshu.com",
                                "value": "guest-token"},
                               {"name": "x-user-id-creator.xiaohongshu.com",
                                "value": "guest-id"}])
             buf = io.StringIO()
+            timed_out = False
             try:
                 with contextlib.redirect_stdout(buf):
                     xhs_auto._wait_for_login(p, scratch, timeout=3)
             except RuntimeError:
-                pass
-            check("只有访客 cookie（无 web_session）时判定为未登录",
-                  "需要登录" in buf.getvalue(), buf.getvalue()[-200:])
+                timed_out = True
+            check("状态不明确时不会误判为已登录", timed_out)
+            check("页面加载宽限期内不误报扫码", "需要登录" not in buf.getvalue(),
+                  buf.getvalue()[-200:])
             check("访客 cookie 不会被误判成已登录",
                   xhs_auto._has_login_cookie(p) is False)
 
@@ -405,19 +417,17 @@ def main():
             check("拿不到 cookie 信息时返回 None（不误判）",
                   xhs_auto._has_login_cookie(p2) is None)
 
-            # 场景 E：最关键的一条 —— 页面上有表单控件，但没有 web_session。
-            # 发布页在未登录时也会渲染上传控件（盖着登录浮层），
-            # 曾因此误判成"登录成功"，然后在后续步骤莫名失败。
-            p = _Page({'input[type="file"]'})
+            # 场景 E：发布入口背后盖着可见二维码遮罩时，阻塞信号优先。
+            p = _Page({'text=上传图片', 'img[src*="qrcode"]'})
             p.context = _Ctx([{"name": "galaxy_creator_session_id", "value": "guest"}])
             buf = io.StringIO()
             try:
                 with contextlib.redirect_stdout(buf):
                     xhs_auto._wait_for_login(p, scratch, timeout=3)
-                check("有表单控件但无 web_session 时必须判为未登录", False,
+                check("有发布入口但被二维码遮挡时必须判为未登录", False,
                       "居然判成已登录了")
             except RuntimeError:
-                check("有表单控件但无 web_session 时判为未登录（不误判）", True)
+                check("可见二维码遮罩优先于发布入口（不误判）", True)
             check("该场景下仍持续提示需要扫码", "需要登录" in buf.getvalue())
 
             # 场景 F：有 web_session 就该立刻通过，不受表单判断影响

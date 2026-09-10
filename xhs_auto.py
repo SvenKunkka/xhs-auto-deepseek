@@ -722,31 +722,42 @@ def _launch_browser(p):
         f"    · 用系统 Chrome 时请先 ⌘Q 完全退出 Chrome\n"
         f"    · 用内置 Chromium 时如提示缺浏览器，运行: playwright install chromium")
 
-def _page_has(page, selectors):
-    """页面上是否出现了任一选择器匹配的元素。异常一律当作"没有"。"""
+def _page_has_visible(page, selectors):
+    """页面上是否出现了任一可见元素。隐藏模板节点不能作为登录证据。"""
     for sel in selectors:
         try:
-            if page.locator(sel).count() > 0:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
                 return True
         except Exception:
             continue
     return False
 
 
-# 判定"已进入发布表单"的元素 —— 命中任一个就说明登录好了，可以往下走
-FORM_SELECTORS = ('input[placeholder*="标题"]', 'div.ql-editor',
-                  'div[contenteditable="true"]', 'input[type="file"]')
-# 判定"需要登录"的线索 —— 比原来只看"扫码登录"四个字宽得多
-LOGIN_SELECTORS = ('text=扫码登录', 'text=扫码', 'text=登录',
-                   'img[src*="qrcode"]', '[class*="qrcode"]', '[class*="login"]')
+# 发布页的强阳性信号。小红书新版创作者中心即使没有旧的 web_session cookie，
+# 只要这些入口可见且没有登录遮罩，就已经能正常上传。
+PUBLISH_READY_SELECTORS = (
+    'text=上传图片', 'text=上传图文',
+    'input[placeholder*="标题"]', 'div.ql-editor',
+    'div[contenteditable="true"]',
+)
+# 明确的登录阻塞信号。不能再用泛化的 text=登录 / [class*=login]：页面菜单、
+# 隐藏模板和“退出登录”也会命中，导致已登录页面被误判。
+LOGIN_BLOCKER_SELECTORS = (
+    'text=扫码登录', 'text=请扫码登录', 'text=手机号登录',
+    'img[src*="qrcode"]', '[class*="qrcode"]',
+    '[class*="login-modal"]', '[class*="login-mask"]',
+)
+LOGIN_PROMPT_GRACE_S = 5
 
 
 def _has_login_cookie(page):
-    """小红书真正的登录凭证是 web_session。
+    """检查旧版创作者中心常见的 web_session 登录凭证。
 
     注意：creator 平台还会种 access-token-creator / x-user-id-creator /
     galaxy_creator_session_id 等 cookie，这些**未登录访客也会被种上**，
-    拿它们判断登录会得出"已登录"的错误结论。
+    拿它们判断登录会得出"已登录"的错误结论。反过来，新版创作者中心
+    已经可能不再设置 web_session，因此缺少它也不能证明未登录。
     返回 True / False，拿不到信息时返回 None（不下结论）。
     """
     try:
@@ -761,11 +772,10 @@ def _wait_for_login(page, out_dir, timeout=None):
 
     返回 True 表示等到了登录（曾提示过扫码），False 表示本来就已登录。
 
-    判定优先级（踩过两次坑，别再调换）：
-      1. web_session cookie 才是权威依据。有就是登录了，没有就是没登录。
-      2. 「页面上有表单元素」只能作为读不到 cookie 时的退路 ——
-         发布页在**未登录**时也会渲染出上传控件（盖着登录浮层），
-         拿它当登录依据会误判成功，然后在后续上传步骤莫名其妙失败。
+    判定优先级：
+      1. 可见的登录页/二维码遮罩是强阻塞信号，出现时必须等待。
+      2. 没有阻塞信号且发布入口可见，说明页面已经可操作，直接继续。
+      3. web_session 只作辅助阳性证据；没有它不能否定新版页面的登录态。
     历史上这里还犯过另一个错：只认 URL 里的 "login" 和页面上的「扫码登录」
     四个字，而发布页 URL 带 ?target=image 时两者都不成立，于是既不提示也
     不报错，一直空转到超时 —— 用户看到的就是「卡住了」且毫无输出。
@@ -777,19 +787,23 @@ def _wait_for_login(page, out_dir, timeout=None):
     started = time.time()
     while time.time() < deadline:
         ck = _has_login_cookie(page)
-        if ck is True:
+        url = str(getattr(page, "url", "") or "")
+        path = url.lower().split("?", 1)[0].rstrip("/")
+        blocked = path.endswith("/login") or _page_has_visible(
+            page, LOGIN_BLOCKER_SELECTORS)
+        ready = _page_has_visible(page, PUBLISH_READY_SELECTORS)
+
+        if ready and not blocked:
+            if ck is False:
+                log("    发布页面已可操作；未见旧版 web_session，按当前页面状态继续")
             return warned
-        # 只有拿不到 cookie 信息（None）时才退回用表单元素判断；
-        # ck is False 表示明确没登录，此时表单元素一律不算数
-        if ck is None and _page_has(page, FORM_SELECTORS):
-            log("    （读不到 cookie，暂按页面表单判断为已登录，若后续失败请重跑）")
+        if ck is True and not blocked:
             return warned
 
-        need_login = "login" in getattr(page, "url", "")
-        if not need_login:
-            need_login = _page_has(page, LOGIN_SELECTORS)
-        if not need_login and ck is False:
-            need_login = True      # 连 web_session 都没有，那肯定没登录
+        # 页面首屏通常要 2~4 秒才渲染出发布入口。此时 cookie 可能已经返回 False，
+        # 但不能抢先提示扫码，否则会出现“先说未登录、几秒后又说已登录”的假警报。
+        elapsed = time.time() - started
+        need_login = blocked or (ck is False and elapsed >= LOGIN_PROMPT_GRACE_S)
         if need_login and not warned:
             log(">>> 需要登录：请在弹出的浏览器窗口里用小红书 App 扫码"
                 "（只需一次，之后会记住登录态）")
@@ -848,10 +862,7 @@ def check_login(timeout=None):
                 log(f"❌ 没等到登录：{e}")
                 return False
             ck = _has_login_cookie(page)
-            log(f"web_session：{'有 ✅' if ck else '没有 ❌' if ck is False else '读不到（不下结论）'}")
-            if ck is False:
-                log("❌ 页面看起来像发布表单，但没有 web_session，判定为未登录。")
-                return False
+            log(f"web_session：{'有（辅助证据）' if ck else '未见（新版页面可不使用）' if ck is False else '读不到（不下结论）'}")
             try:
                 log(f"当前页面：{page.title()}")
             except Exception:
