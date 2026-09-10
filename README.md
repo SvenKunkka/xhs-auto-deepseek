@@ -28,8 +28,22 @@
 ## 安装
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium   # 如果本机没有 Chrome
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
+./.venv/bin/playwright install chromium   # 如果本机没有 Chrome
+```
+
+装好后用 `./run.sh` 启动，它会自动用项目内的 `.venv`：
+
+```bash
+./run.sh "秋冬护肤思路"
+```
+
+想在任何目录直接敲 `xhs`，把它软链到 PATH 里即可：
+
+```bash
+ln -sf "$PWD/run.sh" ~/.local/bin/xhs
+xhs "秋冬护肤思路"
 ```
 
 ## 配置 DeepSeek Key
