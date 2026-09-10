@@ -246,12 +246,34 @@ def log(msg):
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def pause_for_user(msg, fallback_wait=20):
-    """终端等用户回车；非交互环境（stdin 不可用）则等待固定秒数后继续。"""
+    """终端等用户回车；非交互环境（stdin 不可用）则等待固定秒数后继续。
+    只用于"继续了也没关系"的场合；发布确认必须用 confirm_publish。"""
     try:
         input(msg)
     except (EOFError, OSError):
         log(f"（非交互模式，{fallback_wait} 秒后自动继续）")
         time.sleep(fallback_wait)
+
+def confirm_publish(msg):
+    """发布前的确认，fail-closed：拿不到明确确认就绝不发布。
+
+    非交互环境（nohup / cron / 管道 / 被程序调用）里 input() 会立刻
+    EOFError，若沿用 pause_for_user 的"等 20 秒继续"就会在没人确认的
+    情况下真的发帖。这里一律返回 False，把发布留给人工。
+    """
+    if not sys.stdin or not sys.stdin.isatty():
+        log("!! 当前不是交互式终端，出于安全没有点击发布。")
+        log("   图片和文案都已生成，可手动发布；确实想全自动请显式加 --yes")
+        return False
+    try:
+        input(msg)
+        return True
+    except (EOFError, OSError):
+        log("!! 读不到确认输入，出于安全没有点击发布。")
+        return False
+    except KeyboardInterrupt:
+        log("\n已取消发布。")
+        return False
 
 def strip_tags(html):
     html = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", html)
@@ -784,8 +806,18 @@ def publish_to_xhs(data, image_paths, out_dir, auto_yes=False):
         page.screenshot(path=os.path.join(out_dir, "发布前预览.png"))
 
         # ---- 发布 ----
-        if not auto_yes:
-            pause_for_user(">>> 内容已全部填好，去浏览器检查一下。回车=点击发布，Ctrl+C=取消：")
+        # 不能用 pause_for_user：它的兜底是"读不到输入就等 20 秒继续"，
+        # 对发布这一步等于 fail-open —— nohup / cron / 管道 / 任何非交互环境
+        # 都会在无人确认的情况下真的把帖子发出去，--yes 这个显式开关也就白设了。
+        if not auto_yes and not confirm_publish(
+                ">>> 内容已全部填好，去浏览器检查一下。回车=点击发布，Ctrl+C=取消："):
+            try:
+                page.screenshot(path=os.path.join(out_dir, "未发布.png"))
+            except Exception:
+                pass
+            log("已跳过发布。图片和文案都在输出目录里，可手动发。")
+            ctx.close()
+            return
         # 必须精确匹配"发布"二字：侧边栏有"发布笔记"菜单、表单里有"定时发布"，都不能误点
         btn = None
         try:

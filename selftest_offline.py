@@ -373,6 +373,62 @@ def main():
             check("URL 含 login 时也提示扫码", "需要登录" in buf.getvalue())
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+        print("\n[14] 发布确认必须 fail-closed（绝不能在无人确认时发帖）")
+
+        class _TTYEnter:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                return "\n"
+
+            def write(self, s):
+                pass
+
+            def flush(self):
+                pass
+
+        class _TTYEof:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise EOFError
+
+        class _TTYCtrlC:
+            def isatty(self):
+                return True
+
+            def readline(self):
+                raise KeyboardInterrupt
+
+        class _NotATty:
+            def isatty(self):
+                return False
+
+        real_stdin = sys.stdin
+        buf = io.StringIO()
+        try:
+            for label, fake, want in (
+                ("真实终端 + 回车", _TTYEnter(), True),
+                ("终端但 EOF", _TTYEof(), False),
+                ("终端但 Ctrl+C", _TTYCtrlC(), False),
+                ("非交互终端(nohup/管道)", _NotATty(), False),
+            ):
+                sys.stdin = fake
+                with contextlib.redirect_stdout(buf):
+                    got = xhs_auto.confirm_publish("确认：")
+                check(f"{label} -> {got}", got is want, f"期望 {want}")
+        finally:
+            sys.stdin = real_stdin
+        check("非交互时会明确提示不会发布",
+              "不是交互式终端" in buf.getvalue() and "没有点击发布" in buf.getvalue())
+        # 顺带确认发布路径已经不再调用 fail-open 的 pause_for_user
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "xhs_auto.py"), encoding="utf-8").read()
+        check("发布确认不再用 pause_for_user",
+              "pause_for_user(\">>> 内容已全部填好" not in src)
     finally:
         server.shutdown()
         keep = os.path.join(tempfile.gettempdir(), "xhs_selftest_last")
