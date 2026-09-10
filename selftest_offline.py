@@ -371,6 +371,39 @@ def main():
             except RuntimeError:
                 pass
             check("URL 含 login 时也提示扫码", "需要登录" in buf.getvalue())
+
+            # 场景 D：页面无 login 字样、无二维码图，但 cookie 里没有 web_session
+            # —— 只有这种 cookie 级判据才能识破"假登录态"
+            class _Ctx:
+                def __init__(self, cookies):
+                    self._c = cookies
+
+                def cookies(self, url=None):
+                    return self._c
+
+            p = _Page(set())
+            p.context = _Ctx([{"name": "access-token-creator.xiaohongshu.com",
+                               "value": "guest-token"},
+                              {"name": "x-user-id-creator.xiaohongshu.com",
+                               "value": "guest-id"}])
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    xhs_auto._wait_for_login(p, scratch, timeout=3)
+            except RuntimeError:
+                pass
+            check("只有访客 cookie（无 web_session）时判定为未登录",
+                  "需要登录" in buf.getvalue(), buf.getvalue()[-200:])
+            check("访客 cookie 不会被误判成已登录",
+                  xhs_auto._has_login_cookie(p) is False)
+
+            p.context = _Ctx([{"name": "web_session", "value": "real-session"}])
+            check("有 web_session 时判定为已登录",
+                  xhs_auto._has_login_cookie(p) is True)
+
+            p2 = _Page(set())          # 没有 context 属性 -> 拿不到信息，不下结论
+            check("拿不到 cookie 信息时返回 None（不误判）",
+                  xhs_auto._has_login_cookie(p2) is None)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 

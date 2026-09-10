@@ -649,6 +649,21 @@ LOGIN_SELECTORS = ('text=扫码登录', 'text=扫码', 'text=登录',
                    'img[src*="qrcode"]', '[class*="qrcode"]', '[class*="login"]')
 
 
+def _has_login_cookie(page):
+    """小红书真正的登录凭证是 web_session。
+
+    注意：creator 平台还会种 access-token-creator / x-user-id-creator /
+    galaxy_creator_session_id 等 cookie，这些**未登录访客也会被种上**，
+    拿它们判断登录会得出"已登录"的错误结论。
+    返回 True / False，拿不到信息时返回 None（不下结论）。
+    """
+    try:
+        cookies = page.context.cookies("https://creator.xiaohongshu.com")
+    except Exception:
+        return None
+    return any(c.get("name") == "web_session" and c.get("value") for c in cookies)
+
+
 def _wait_for_login(page, out_dir, timeout=None):
     """等到页面进入发布表单为止；需要登录就提示扫码。
 
@@ -671,6 +686,8 @@ def _wait_for_login(page, out_dir, timeout=None):
         need_login = "login" in getattr(page, "url", "")
         if not need_login:
             need_login = _page_has(page, LOGIN_SELECTORS)
+        if not need_login and _has_login_cookie(page) is False:
+            need_login = True      # 连 web_session 都没有，那肯定没登录
         if need_login and not warned:
             log(">>> 需要登录：请在弹出的浏览器窗口里用小红书 App 扫码"
                 "（只需一次，之后会记住登录态）")
