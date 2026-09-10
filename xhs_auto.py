@@ -673,16 +673,28 @@ def _app_running(name):
 def _launch_browser(p):
     """启动浏览器。
 
-    默认复用系统 Chrome + 你日常的 profile，这样小红书等站点都保持登录，
-    不用反复扫码。代价是运行前必须先完全退出 Chrome（profile 被占用会启动失败）。
-    想用完全隔离的 profile（不打扰日常浏览器）就设 XHS_PROFILE_DIR。
+    默认用独立 profile（~/Downloads/xhs_auto/browser_profile）：扫码一次后
+    登录态长期保存在那里，完全不碰你日常浏览器。
+
+    复用系统 Chrome 的 profile 需要过两道闸，因为它会造成不可逆的数据损坏。
     """
+    if USING_SYSTEM_PROFILE and not _env("XHS_ACCEPT_PROFILE_RISK"):
+        raise RuntimeError(
+            "拒绝用 Playwright 启动你日常的 Chrome profile。\n"
+            "    原因：Playwright 启动 Chrome 时会自动附加这两个参数\n"
+            "      --use-mock-keychain --password-store=basic\n"
+            "    于是 Chrome 改用「假钥匙串」，读不出用真实钥匙串加密的 cookie，\n"
+            "    会把这些 cookie 当作无效数据清掉。实测后果是浏览器退出登录、\n"
+            "    大量网站需要重新登录，且无法恢复。本项目真实踩过这个坑。\n"
+            "    · 推荐：去掉 XHS_USE_SYSTEM_CHROME，改用独立 profile 扫码一次\n"
+            "    · 确实要冒险：再设 XHS_ACCEPT_PROFILE_RISK=1（后果自负）")
+
     if USING_SYSTEM_PROFILE and _app_running("Google Chrome"):
         raise RuntimeError(
             "检测到你的 Google Chrome 正在运行，它占着 profile，自动化起不来。\n"
             "    → 请先完全退出 Chrome（⌘Q，不是只关窗口），再重跑本命令。\n"
             "    → 如果希望用一套独立 profile、完全不打扰日常浏览器：\n"
-            "       export XHS_PROFILE_DIR=~/Downloads/xhs_auto/browser_profile")
+            "       去掉 XHS_USE_SYSTEM_CHROME 即可")
 
     kwargs = dict(headless=False, viewport={"width": 1440, "height": 900},
                   args=["--disable-blink-features=AutomationControlled"])
