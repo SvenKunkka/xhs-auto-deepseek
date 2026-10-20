@@ -1,3 +1,7 @@
+<!-- SVENKUNKKA-README-NAV:BEGIN -->
+[中文项目说明](#project-overview-zh) · [English overview](#project-overview-en) · [维护者 X / Maintainer on X](https://x.com/Svenu1s5)
+<!-- SVENKUNKKA-README-NAV:END -->
+
 # xhs-auto-deepseek 小红书图文笔记自动生成 + 发布（DeepSeek 文案版）
 
 > **这是衍生作品**：基于 [jiawen-w/xhs-auto](https://github.com/jiawen-w/xhs-auto)（MIT）改造，把文案模型从火山方舟（豆包）换成 **DeepSeek**。原作者版权声明保留在 [LICENSE](LICENSE) 中。
@@ -147,3 +151,30 @@ python3 xhs_auto.py --repost <输出目录>       # 重新发布之前生成过�
 ## License
 
 MIT，见 [LICENSE](LICENSE)。原项目版权归 jiawen-w 所有，改造部分同样以 MIT 释出。
+
+
+---
+
+<!-- SVENKUNKKA-PROJECT-INFO:BEGIN -->
+
+<a id="project-overview-zh"></a>
+## 中文项目说明
+
+基于 jiawen-w/xhs-auto 的 DeepSeek 适配衍生项目，从话题生成参考材料、图文文案与 3:4 卡片，并通过 Playwright 辅助发布，增加重试、JSON 修复及离线自检。
+
+**使用入口：** 按原说明创建虚拟环境、安装依赖并配置 API；可先用 `python3 xhs_auto.py "话题" --no-publish` 只生成产物，离线自检入口为 `selftest_offline.py`。
+
+**范围说明：** 原始生产链路与模板归上游作者；真实模型调用产生费用，发布依赖用户登录及平台页面，默认保留发布前人工确认。
+
+<a id="project-overview-en"></a>
+## English project overview
+
+A DeepSeek adaptation derived from jiawen-w/xhs-auto, generating research material, copy and 3:4 image cards from a topic, with Playwright-assisted publishing, retries, JSON repair and offline self-tests.
+
+**Getting started:** Follow the instructions in the original README to create a virtual environment, install dependencies and configure the API. Start with `python3 xhs_auto.py "topic" --no-publish` for generation only; offline checks use `selftest_offline.py`.
+
+**Scope:** The original production workflow and templates belong to the upstream author. Live model calls incur charges; publishing depends on user login and platform pages and retains manual confirmation by default.
+
+**仓库维护者 / Repository maintainer:** [SvenKunkka](https://github.com/SvenKunkka) · [X / Twitter](https://x.com/Svenu1s5)
+
+<!-- SVENKUNKKA-PROJECT-INFO:END -->
